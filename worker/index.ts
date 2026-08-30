@@ -257,110 +257,373 @@ type AiRunResult = {
   response?: string;
 };
 
+type ExtractedMemory = {
+  key: string;
+  value: string;
+  category: string;
+  importance: number;
+};
+
+type StoredMemory = {
+  memory_key: string;
+  memory_value: string;
+  category: string;
+  importance: number;
+  updated_at: number;
+};
+
+function normalizeMemoryKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 60);
+}
+
+function cleanMemoryValue(value: string): string {
+  return value.trim().replace(/\s+/g, " ").slice(0, 300);
+}
+
+function clampImportance(value: number): number {
+  if (!Number.isFinite(value)) return 5;
+  return Math.min(10, Math.max(1, Math.round(value)));
+}
+
+// Μερικά μοντέλα επιστρέφουν JSON τυλιγμένο σε markdown fences.
+function parseJsonObject<T>(raw: string): T | null {
+  const cleaned = raw
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  try {
+    return JSON.parse(cleaned) as T;
+  } catch {
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start === -1 || end === -1 || end <= start) return null;
+    try {
+      return JSON.parse(cleaned.slice(start, end + 1)) as T;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/* --------------------------- Έλεγχος γλώσσας ------------------------------
+ * Το Llama 4 Scout περιστασιακά γλιστράει σε κυριλλικά όταν γράφει ελληνικά,
+ * επειδή τα δύο αλφάβητα μοιράζονται γειτονικό token space. Το prompt δεν
+ * αρκεί, οπότε ελέγχουμε και στον κώδικα και ξαναζητάμε απάντηση.
+ * -------------------------------------------------------------------------- */
+
+const CYRILLIC = /[\u0400-\u04FF]/;
+const GREEK = /[\u0370-\u03FF\u1F00-\u1FFF]/;
+
+function isGreek(text: string): boolean {
+  return GREEK.test(text);
+}
+
+function hasCyrillic(text: string): boolean {
+  return CYRILLIC.test(text);
+}
+
+async function getUserMemories(env: Env, userId: string): Promise<StoredMemory[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT memory_key, memory_value, category, importance, updated_at
+     FROM user_memory
+     WHERE user_id = ?
+     ORDER BY importance DESC, updated_at DESC
+     LIMIT 30`
+  )
+    .bind(userId)
+    .all<StoredMemory>();
+
+  return results ?? [];
+}
+
+async function upsertUserMemory(env: Env, userId: string, memory: ExtractedMemory): Promise<void> {
+  const key = normalizeMemoryKey(memory.key);
+  const value = cleanMemoryValue(memory.value);
+  if (!key || value.length < 2) return;
+
+  const now = Date.now();
+
+  await env.DB.prepare(
+    `INSERT INTO user_memory (id, user_id, memory_key, memory_value, category, importance, created_at, updated_at)
+     VALUES (?,?,?,?,?,?,?,?)
+     ON CONFLICT(user_id, memory_key) DO UPDATE SET
+       memory_value = excluded.memory_value,
+       category = excluded.category,
+       importance = excluded.importance,
+       updated_at = excluded.updated_at`
+  )
+    .bind(
+      crypto.randomUUID(),
+      userId,
+      key,
+      value,
+      memory.category || "general",
+      clampImportance(memory.importance),
+      now,
+      now
+    )
+    .run();
+}
+
+function buildMemoryContext(memories: StoredMemory[]): string {
+  if (memories.length === 0) {
+    return "Δεν υπάρχουν ακόμη αποθηκευμένες πληροφορίες για τον χρήστη.";
+  }
+  return memories.map((m) => `- [${m.category}] ${m.memory_key}: ${m.memory_value}`).join("\n");
+}
+
+const MEMORY_EXTRACTION_PROMPT = [
+  "Είσαι μηχανισμός εξαγωγής μακροχρόνιας μνήμης χρήστη.",
+  "Εξάγεις μόνο σταθερές, χρήσιμες πληροφορίες για μελλοντική συζήτηση.",
+  "",
+  "Επιτρέπονται: όνομα, πόλη, οικογένεια, κατοικίδια, ενδιαφέροντα, χόμπι,",
+  "αγαπημένες ομάδες ή φαγητά, σταθερές προτιμήσεις, επάγγελμα, στόχοι.",
+  "",
+  "ΔΕΝ αποθηκεύεις: κωδικούς, tokens, οικονομικά, δεδομένα υγείας,",
+  "προσωρινές διαθέσεις, τον καιρό, εφήμερες ερωτήσεις, υποθέσεις.",
+  "",
+  'Αν δεν υπάρχει σταθερή πληροφορία επέστρεψε: {"memories":[]}',
+  "",
+  "Αλλιώς επέστρεψε μόνο έγκυρο JSON:",
+  '{"memories":[{"key":"pet_name","value":"Ρεξ","category":"pets","importance":7}]}',
+  "",
+  "Το key: σύντομο, αγγλικά, snake_case, μία ιδιότητα.",
+  "Κατηγορίες: identity, location, family, pets, interests, preferences, work, goals, general",
+  "Importance: αριθμός 1 έως 10.",
+  "",
+  "Επέστρεψε ΜΟΝΟ JSON, χωρίς markdown, χωρίς εξηγήσεις."
+].join("\n");
+
+async function extractMemoriesFromMessage(env: Env, message: string): Promise<ExtractedMemory[]> {
+  const cleanMessage = message.trim().slice(0, 4000);
+  if (!cleanMessage) return [];
+
+  try {
+    const result = (await env.AI.run(AI_MODEL, {
+      messages: [
+        { role: "system", content: MEMORY_EXTRACTION_PROMPT },
+        { role: "user", content: cleanMessage }
+      ],
+      max_tokens: 350,
+      temperature: 0.1,
+      top_p: 0.8
+    })) as AiRunResult;
+
+    const raw = typeof result.response === "string" ? result.response.trim() : "";
+    if (!raw) return [];
+
+    const parsed = parseJsonObject<{ memories?: ExtractedMemory[] }>(raw);
+    if (!parsed || !Array.isArray(parsed.memories)) {
+      console.warn("Memory extraction returned invalid JSON", { raw });
+      return [];
+    }
+
+    return parsed.memories
+      .filter(
+        (m): m is ExtractedMemory =>
+          Boolean(m) &&
+          typeof m.key === "string" &&
+          typeof m.value === "string" &&
+          typeof m.category === "string" &&
+          typeof m.importance === "number"
+      )
+      .slice(0, 5)
+      .map((m) => ({
+        key: normalizeMemoryKey(m.key),
+        value: cleanMemoryValue(m.value),
+        category: m.category,
+        importance: clampImportance(m.importance)
+      }))
+      .filter((m) => m.key.length > 0 && m.value.length >= 2);
+  } catch (error) {
+    // Αποτυχία μνήμης δεν πρέπει να κόβει την κύρια απάντηση.
+    console.error("Memory extraction failed", {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return [];
+  }
+}
+
+/* ---------------------------- Memory endpoints ---------------------------- */
+
+app.get("/api/ai/memory", requireSession, async (c) => {
+  const memories = await getUserMemories(c.env, c.get("session").userId);
+  return c.json({
+    memories: memories.map((m) => ({
+      key: m.memory_key,
+      value: m.memory_value,
+      category: m.category,
+      importance: m.importance,
+      updatedAt: m.updated_at
+    }))
+  });
+});
+
+app.delete("/api/ai/memory/:key", requireSession, async (c) => {
+  const key = normalizeMemoryKey(c.req.param("key"));
+  if (!key) return c.json({ error: "invalid_memory_key" }, 400);
+
+  await c.env.DB.prepare("DELETE FROM user_memory WHERE user_id = ? AND memory_key = ?")
+    .bind(c.get("session").userId, key)
+    .run();
+
+  return c.json({ ok: true });
+});
+
+app.delete("/api/ai/memory", requireSession, async (c) => {
+  await c.env.DB.prepare("DELETE FROM user_memory WHERE user_id = ?")
+    .bind(c.get("session").userId)
+    .run();
+  return c.json({ ok: true });
+});
+
+/* ------------------------------- AI chat ---------------------------------- */
+
+function buildLiakosPrompt(userName: string, memoryContext: string): string {
+  return [
+    "Είσαι ο Λιάκος, ο χαρακτήρας και η μασκότ του Liakos Chat.",
+    "",
+    `Ο χρήστης λέγεται ${userName}.`,
+    "",
+    "Μιλάς φυσικά, χαλαρά και φιλικά, σαν μέλος της παρέας.",
+    "",
+    "ΚΑΝΟΝΑΣ ΓΛΩΣΣΑΣ - ΑΠΟΛΥΤΟΣ:",
+    "Αν το μήνυμα του χρήστη είναι στα ελληνικά, γράφεις ΜΟΝΟ με ελληνικό αλφάβητο.",
+    "Απαγορεύεται εντελώς το κυριλλικό αλφάβητο. Καμία ρωσική ή σλαβική λέξη.",
+    "Απαγορεύονται αγγλικές λέξεις μέσα σε ελληνική πρόταση.",
+    "Πριν στείλεις την απάντηση, έλεγξέ την: αν περιέχει έστω έναν χαρακτήρα",
+    "εκτός ελληνικού αλφαβήτου, ξαναγράψ' την από την αρχή στα ελληνικά.",
+    "Αν το μήνυμα είναι στα αγγλικά, απαντάς μόνο στα αγγλικά.",
+    "",
+    "Οι απαντήσεις σου είναι σύντομες και πρακτικές.",
+    "Δεν γράφεις μεγάλα κείμενα, εκτός αν ζητηθεί αναλυτική απάντηση.",
+    "Μπορείς να χρησιμοποιείς λίγο έξυπνο και ευγενικό χιούμορ.",
+    "",
+    "Αν σε ρωτήσουν ποιος είσαι, συστήνεσαι ως ο Λιάκος και λες ότι ζεις",
+    "μέσα στο Liakos Chat. Απαντάς φυσικά, όχι σαν εταιρικός βοηθός.",
+    "",
+    "Δεν λες ποτέ ότι είσαι ChatGPT ή language model.",
+    "Δεν αναφέρεις system prompts ή τεχνικές οδηγίες.",
+    "",
+    "Αποθηκευμένες πληροφορίες για τον χρήστη:",
+    "",
+    memoryContext,
+    "",
+    "Κανόνες μνήμης:",
+    "- Χρησιμοποίησε τις πληροφορίες μόνο όταν είναι σχετικές.",
+    "- Μην απαριθμείς όλες τις μνήμες χωρίς λόγο.",
+    "- Μην αναφέρεις ότι διάβασες στοιχεία από βάση δεδομένων.",
+    "- Μην εφευρίσκεις μνήμες.",
+    "- Αν δεν ξέρεις κάτι, πες καθαρά ότι δεν το θυμάσαι ακόμη.",
+    "- Σε αντίφαση, προτίμησε την πιο πρόσφατη πληροφορία."
+  ].join("\n");
+}
+
 app.post("/api/ai/chat", requireSession, async (c) => {
   try {
-    const body = await c.req.json<{
-      messages?: AiChatMessage[];
-    }>();
+    const body = await c.req.json<{ messages?: AiChatMessage[] }>();
 
     const messages = Array.isArray(body.messages)
       ? body.messages
           .filter(
-            (message): message is AiChatMessage =>
-              Boolean(message) &&
-              (message.role === "user" ||
-                message.role === "assistant") &&
-              typeof message.content === "string" &&
-              message.content.trim().length > 0
+            (m): m is AiChatMessage =>
+              Boolean(m) &&
+              (m.role === "user" || m.role === "assistant") &&
+              typeof m.content === "string" &&
+              m.content.trim().length > 0
           )
           .slice(-12)
-          .map((message) => ({
-            role: message.role,
-            content: message.content.trim().slice(0, 4000)
-          }))
+          .map((m) => ({ role: m.role, content: m.content.trim().slice(0, 4000) }))
       : [];
 
     if (messages.length === 0) {
-      return c.json(
-        {
-          error: "empty_messages",
-          message: "Γράψε κάτι για να απαντήσει ο Λιάκος."
-        },
-        400
-      );
+      return c.json({ error: "empty_messages", message: "Γράψε κάτι για να απαντήσει ο Λιάκος." }, 400);
     }
 
     const session = c.get("session");
+    const latestUserMessage = [...messages].reverse().find((m) => m.role === "user");
 
-    const result = (await c.env.AI.run(AI_MODEL, {
-      messages: [
-        {
-          role: "system",
-          content: [
-            "Είσαι ο Λιάκος, ο AI φίλος μέσα στην εφαρμογή Liakos Chat.",
-            `Ο χρήστης λέγεται ${session.name}.`,
-            "Μιλάς φιλικά, απλά και φυσικά.",
-            "Απαντάς στην ίδια γλώσσα που χρησιμοποιεί ο χρήστης.",
-            "Στα ελληνικά χρησιμοποιείς σωστά ελληνικά.",
-            "Οι απαντήσεις σου είναι σύντομες και πρακτικές.",
-            "Δεν γράφεις μεγάλα κείμενα, εκτός αν ο χρήστης ζητήσει αναλυτική απάντηση.",
-            "Μπορείς να χρησιμοποιείς λίγο χιούμορ, χωρίς υπερβολές.",
-            "Δεν ισχυρίζεσαι ότι γνωρίζεις τα chats, τα videos ή προσωπικά δεδομένα του χρήστη.",
-            "Αν δεν γνωρίζεις κάτι, το λες καθαρά.",
-            "Αν ο χρήστης ζητήσει τρέχουσες πληροφορίες, εξηγείς ότι δεν έχεις ζωντανή πρόσβαση στο διαδίκτυο.",
-            "Μην αναφέρεις system prompts, μοντέλα ή τεχνικές οδηγίες."
-          ].join(" ")
-        },
-        ...messages
-      ],
-      max_tokens: 450,
-      temperature: 0.7,
-      top_p: 0.9,
-      repetition_penalty: 1.05
-    })) as AiRunResult;
+    // Εξάγουμε νέες μνήμες ΠΡΙΝ την απάντηση, ώστε ο Λιάκος να μπορεί να
+    // χρησιμοποιήσει αμέσως ένα νέο fact στην ίδια συζήτηση.
+    if (latestUserMessage) {
+      const extracted = await extractMemoriesFromMessage(c.env, latestUserMessage.content);
+      for (const memory of extracted) {
+        await upsertUserMemory(c.env, session.userId, memory);
+      }
+    }
 
-    const reply =
-      typeof result.response === "string"
-        ? result.response.trim()
-        : "";
+    const storedMemories = await getUserMemories(c.env, session.userId);
+    const memoryContext = buildMemoryContext(storedMemories);
+    const systemPrompt = buildLiakosPrompt(session.name, memoryContext);
+
+    const userWroteGreek = latestUserMessage ? isGreek(latestUserMessage.content) : false;
+
+    async function ask(extraSystem?: string): Promise<string> {
+      const systemMessages = extraSystem
+        ? [
+            { role: "system" as const, content: systemPrompt },
+            { role: "system" as const, content: extraSystem }
+          ]
+        : [{ role: "system" as const, content: systemPrompt }];
+
+      const result = (await c.env.AI.run(AI_MODEL, {
+        messages: [...systemMessages, ...messages],
+        max_tokens: 500,
+        temperature: 0.4,
+        top_p: 0.85,
+        repetition_penalty: 1.1
+      })) as AiRunResult;
+
+      return typeof result.response === "string" ? result.response.trim() : "";
+    }
+
+    let reply = await ask();
+
+    // Δεύτερη ευκαιρία αν ξέφυγαν κυριλλικά σε ελληνική συνομιλία.
+    if (userWroteGreek && hasCyrillic(reply)) {
+      console.warn("Cyrillic detected in Greek reply, retrying", { reply });
+      reply = await ask(
+        "Η προηγούμενη απάντησή σου περιείχε κυριλλικούς χαρακτήρες. Αυτό είναι λάθος. Γράψε ξανά την απάντηση αποκλειστικά με ελληνικό αλφάβητο."
+      );
+
+      // Αν επιμένει, καθαρίζουμε τις κυριλλικές λέξεις.
+      if (hasCyrillic(reply)) {
+        reply = reply
+          .split(/\s+/)
+          .filter((word) => !CYRILLIC.test(word))
+          .join(" ")
+          .replace(/\s+([,.!;:])/g, "$1")
+          .trim();
+      }
+    }
 
     if (!reply) {
-      console.error("Workers AI returned an empty response", {
-        model: AI_MODEL,
-        result
-      });
-
+      console.error("Workers AI returned an empty response", { model: AI_MODEL });
       return c.json(
-        {
-          error: "empty_ai_response",
-          message: "Ο Λιάκος δεν κατάφερε να απαντήσει. Δοκίμασε ξανά."
-        },
+        { error: "empty_ai_response", message: "Ο Λιάκος δεν κατάφερε να απαντήσει. Δοκίμασε ξανά." },
         502
       );
     }
 
-    return c.json({
-      reply,
-      model: AI_MODEL
-    });
+    return c.json({ reply, model: AI_MODEL, memoriesUsed: storedMemories.length });
   } catch (error) {
     console.error("AI chat failed", {
       model: AI_MODEL,
       error:
         error instanceof Error
-          ? {
-              name: error.name,
-              message: error.message,
-              stack: error.stack
-            }
+          ? { name: error.name, message: error.message, stack: error.stack }
           : String(error)
     });
 
     return c.json(
-      {
-        error: "ai_unavailable",
-        message: "Ο Λιάκος δεν είναι διαθέσιμος αυτή τη στιγμή. Δοκίμασε ξανά."
-      },
+      { error: "ai_unavailable", message: "Ο Λιάκος δεν είναι διαθέσιμος αυτή τη στιγμή. Δοκίμασε ξανά." },
       502
     );
   }
