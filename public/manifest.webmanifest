@@ -1,0 +1,9 @@
+{
+  "name": "Liakos Chat",
+  "short_name": "Liakos",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#140f2e",
+  "theme_color": "#140f2e",
+  "icons": []
+}

@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  font-synthesis: none;
+}
+
+html, body, #root { min-height: 100%; }
+body { @apply m-0 bg-liakos-900 text-white antialiased; overflow-x: hidden; }
+button, input { font: inherit; }
+button { -webkit-tap-highlight-color: transparent; }
+
+.card { @apply rounded-[1.75rem] border border-white/10 bg-white/5 p-4; }
+.btn { @apply rounded-2xl bg-liakos-500 px-5 py-3 font-bold active:scale-95 transition disabled:opacity-50; }
+.input { @apply w-full rounded-2xl border border-white/10 bg-white/10 px-4 py-3.5 outline-none placeholder-white/35 focus:border-liakos-500; }
+
+.app-with-nav { min-height: 100dvh; padding-bottom: calc(5.5rem + env(safe-area-inset-bottom)); }
+.page-shell { min-height: calc(100dvh - 5.5rem - env(safe-area-inset-bottom)); padding: max(1rem, env(safe-area-inset-top)) 1rem 1rem; }
+.screen-grid { height: calc(100dvh - 5.5rem - env(safe-area-inset-bottom)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+.screen-title { @apply text-[clamp(1.75rem,7vw,2.35rem)] font-black leading-tight; }
+.screen-subtitle { @apply mt-1 text-[clamp(0.9rem,3.8vw,1rem)] text-white/55; }
+.primary-action { @apply flex min-h-14 w-full items-center justify-center rounded-2xl bg-liakos-500 px-5 py-3 text-base font-black active:scale-[0.98] transition disabled:opacity-50; }
+.secondary-action { @apply flex min-h-14 w-full items-center justify-center rounded-2xl border border-white/15 bg-white/10 px-5 py-3 text-base font-bold active:scale-[0.98] transition; }
+
+.bottom-nav {
+  position: fixed;
+  z-index: 40;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  min-height: 5.5rem;
+  padding: 0.35rem 0.2rem calc(0.35rem + env(safe-area-inset-bottom));
+  border-top: 1px solid rgb(255 255 255 / 0.10);
+  background: rgb(20 15 46 / 0.97);
+  backdrop-filter: blur(18px);
+}
+.nav-item { @apply flex min-w-0 flex-col items-center justify-center gap-0.5 rounded-2xl text-white/55 active:scale-90 transition; }
+.nav-item-active { @apply bg-liakos-500/20 text-liakos-500; }
+.nav-icon { font-size: clamp(1.65rem, 8vw, 2.2rem); line-height: 1; }
+.nav-label { font-size: clamp(0.68rem, 3.3vw, 0.82rem); font-weight: 800; line-height: 1.1; white-space: nowrap; }
+.composer-safe { padding-bottom: max(0.75rem, env(safe-area-inset-bottom)); }
+
+@media (max-height: 690px) {
+  .bottom-nav { min-height: 4.75rem; }
+  .app-with-nav { padding-bottom: calc(4.75rem + env(safe-area-inset-bottom)); }
+  .page-shell, .screen-grid { min-height: calc(100dvh - 4.75rem - env(safe-area-inset-bottom)); }
+  .screen-grid { height: calc(100dvh - 4.75rem - env(safe-area-inset-bottom)); }
+  .nav-icon { font-size: 1.55rem; }
+}
