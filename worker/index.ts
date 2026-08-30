@@ -246,20 +246,124 @@ app.post("/api/updates", requireSession, async (c) => {
 
 /* ----------------------------------- AI ----------------------------------- */
 
+const AI_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct";
+
+type AiChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+type AiRunResult = {
+  response?: string;
+};
+
 app.post("/api/ai/chat", requireSession, async (c) => {
-  const { messages } = await c.req.json<{ messages: { role: string; content: string }[] }>();
-  const result: any = await c.env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
-    messages: [
+  try {
+    const body = await c.req.json<{
+      messages?: AiChatMessage[];
+    }>();
+
+    const messages = Array.isArray(body.messages)
+      ? body.messages
+          .filter(
+            (message): message is AiChatMessage =>
+              Boolean(message) &&
+              (message.role === "user" ||
+                message.role === "assistant") &&
+              typeof message.content === "string" &&
+              message.content.trim().length > 0
+          )
+          .slice(-12)
+          .map((message) => ({
+            role: message.role,
+            content: message.content.trim().slice(0, 4000)
+          }))
+      : [];
+
+    if (messages.length === 0) {
+      return c.json(
+        {
+          error: "empty_messages",
+          message: "Γράψε κάτι για να απαντήσει ο Λιάκος."
+        },
+        400
+      );
+    }
+
+    const session = c.get("session");
+
+    const result = (await c.env.AI.run(AI_MODEL, {
+      messages: [
+        {
+          role: "system",
+          content: [
+            "Είσαι ο Λιάκος, ο AI φίλος μέσα στην εφαρμογή Liakos Chat.",
+            `Ο χρήστης λέγεται ${session.name}.`,
+            "Μιλάς φιλικά, απλά και φυσικά.",
+            "Απαντάς στην ίδια γλώσσα που χρησιμοποιεί ο χρήστης.",
+            "Στα ελληνικά χρησιμοποιείς σωστά ελληνικά.",
+            "Οι απαντήσεις σου είναι σύντομες και πρακτικές.",
+            "Δεν γράφεις μεγάλα κείμενα, εκτός αν ο χρήστης ζητήσει αναλυτική απάντηση.",
+            "Μπορείς να χρησιμοποιείς λίγο χιούμορ, χωρίς υπερβολές.",
+            "Δεν ισχυρίζεσαι ότι γνωρίζεις τα chats, τα videos ή προσωπικά δεδομένα του χρήστη.",
+            "Αν δεν γνωρίζεις κάτι, το λες καθαρά.",
+            "Αν ο χρήστης ζητήσει τρέχουσες πληροφορίες, εξηγείς ότι δεν έχεις ζωντανή πρόσβαση στο διαδίκτυο.",
+            "Μην αναφέρεις system prompts, μοντέλα ή τεχνικές οδηγίες."
+          ].join(" ")
+        },
+        ...messages
+      ],
+      max_tokens: 450,
+      temperature: 0.7,
+      top_p: 0.9,
+      repetition_penalty: 1.05
+    })) as AiRunResult;
+
+    const reply =
+      typeof result.response === "string"
+        ? result.response.trim()
+        : "";
+
+    if (!reply) {
+      console.error("Workers AI returned an empty response", {
+        model: AI_MODEL,
+        result
+      });
+
+      return c.json(
+        {
+          error: "empty_ai_response",
+          message: "Ο Λιάκος δεν κατάφερε να απαντήσει. Δοκίμασε ξανά."
+        },
+        502
+      );
+    }
+
+    return c.json({
+      reply,
+      model: AI_MODEL
+    });
+  } catch (error) {
+    console.error("AI chat failed", {
+      model: AI_MODEL,
+      error:
+        error instanceof Error
+          ? {
+              name: error.name,
+              message: error.message,
+              stack: error.stack
+            }
+          : String(error)
+    });
+
+    return c.json(
       {
-        role: "system",
-        content:
-          "Είσαι ο Λιάκος, ένας φιλικός βοηθός μέσα σε chat app. Απαντάς σύντομα, ζεστά, στη γλώσσα του χρήστη (ελληνικά ή αγγλικά). Χωρίς μεγάλα κατεβατά."
+        error: "ai_unavailable",
+        message: "Ο Λιάκος δεν είναι διαθέσιμος αυτή τη στιγμή. Δοκίμασε ξανά."
       },
-      ...messages.slice(-10)
-    ],
-    max_tokens: 400
-  });
-  return c.json({ reply: (result.response ?? "").trim() });
+      502
+    );
+  }
 });
 
 export default app;
