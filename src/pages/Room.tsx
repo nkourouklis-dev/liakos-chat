@@ -1,8 +1,22 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { getRoom, getUser, joinRoom, listMessages, mediaUrl, openRoomSocket, type Message } from "../services/api";
+import {
+  getRoom,
+  getUser,
+  joinRoom,
+  listMessages,
+  markRoomRead,
+  mediaUrl,
+  openRoomSocket,
+  type Message
+} from "../services/api";
 
-export default function Room() {
+interface RoomProps {
+  onEnter?: (roomId: string) => void;
+  onLeave?: () => void;
+}
+
+export default function Room({ onEnter, onLeave }: RoomProps) {
   const { roomId = "" } = useParams();
   const [messages, setMessages] = useState<Message[]>([]);
   const [roomName, setRoomName] = useState("Δωμάτιο");
@@ -16,6 +30,10 @@ export default function Room() {
 
   useEffect(() => {
     let cancelled = false;
+
+    // Μπαίνοντας στο δωμάτιο μηδενίζουμε τα αδιάβαστα, τοπικά και στον server.
+    onEnter?.(roomId);
+    markRoomRead(roomId).catch(() => undefined);
 
     getRoom(roomId)
       .then((room) => !cancelled && setRoomName(room.name))
@@ -46,7 +64,13 @@ export default function Room() {
     return () => {
       cancelled = true;
       socket.close();
+      // Βγαίνοντας σημειώνουμε ξανά ως διαβασμένο, ώστε να μη μετρηθούν
+      // όσα ήρθαν ενώ ήμασταν μέσα στο δωμάτιο.
+      markRoomRead(roomId)
+        .catch(() => undefined)
+        .finally(() => onLeave?.());
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId]);
 
   useEffect(() => {
@@ -77,8 +101,8 @@ export default function Room() {
   }
 
   return (
-    <div className="grid h-dvh grid-rows-[auto_1fr_auto] pb-24">
-      <header className="flex items-center gap-3 border-b border-white/10 px-4 py-3">
+    <div className="grid h-dvh grid-rows-[auto_1fr_auto]">
+      <header className="flex items-center gap-3 border-b border-white/10 px-4 py-3 pt-[max(0.75rem,env(safe-area-inset-top))]">
         <button
           className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-white/10 text-2xl active:scale-90 transition"
           onClick={() => navigate("/chats")}
@@ -131,7 +155,7 @@ export default function Room() {
         </div>
       </div>
 
-      <div className="flex gap-3 border-t border-white/10 p-3">
+      <div className="composer-safe flex gap-3 border-t border-white/10 p-3">
         <input
           className="input text-base"
           placeholder="Γράψε κάτι..."

@@ -174,6 +174,51 @@ app.get("/api/rooms/:id/messages", requireSession, async (c) => {
   return c.json({ messages: (results as any[]).reverse() });
 });
 
+/* ------------------------------ Unread badges ------------------------------
+ * Μετράμε πόσα μηνύματα γράφτηκαν σε κάθε δωμάτιο μετά την τελευταία φορά
+ * που το άνοιξε ο χρήστης. Δεν μετράμε τα δικά του μηνύματα.
+ * -------------------------------------------------------------------------- */
+
+app.get("/api/unread", requireSession, async (c) => {
+  const userId = c.get("session").userId;
+
+  const { results } = await c.env.DB.prepare(
+    `SELECT
+       r.id AS roomId,
+       r.name AS roomName,
+       COUNT(msg.id) AS count,
+       MAX(msg.created_at) AS lastAt
+     FROM rooms r
+     JOIN room_members mem ON mem.room_id = r.id AND mem.user_id = ?
+     LEFT JOIN room_reads rd ON rd.room_id = r.id AND rd.user_id = ?
+     LEFT JOIN messages msg
+       ON msg.room_id = r.id
+      AND msg.user_id != ?
+      AND msg.created_at > COALESCE(rd.last_read_at, mem.joined_at)
+     GROUP BY r.id, r.name
+     HAVING COUNT(msg.id) > 0`
+  )
+    .bind(userId, userId, userId)
+    .all<{ roomId: string; roomName: string; count: number; lastAt: number }>();
+
+  const rooms = results ?? [];
+  const total = rooms.reduce((sum, room) => sum + room.count, 0);
+
+  return c.json({ total, rooms });
+});
+
+app.post("/api/rooms/:id/read", requireSession, async (c) => {
+  await c.env.DB.prepare(
+    `INSERT INTO room_reads (room_id, user_id, last_read_at)
+     VALUES (?,?,?)
+     ON CONFLICT(room_id, user_id) DO UPDATE SET last_read_at = excluded.last_read_at`
+  )
+    .bind(c.req.param("id"), c.get("session").userId, Date.now())
+    .run();
+
+  return c.json({ ok: true });
+});
+
 /* ---------------------------------- Media ---------------------------------- */
 
 app.post("/api/media", requireSession, async (c) => {
@@ -314,8 +359,7 @@ function parseJsonObject<T>(raw: string): T | null {
 
 /* --------------------------- Έλεγχος γλώσσας ------------------------------
  * Το Llama 4 Scout περιστασιακά γλιστράει σε κυριλλικά όταν γράφει ελληνικά,
- * επειδή τα δύο αλφάβητα μοιράζονται γειτονικό token space. Το prompt δεν
- * αρκεί, οπότε ελέγχουμε και στον κώδικα και ξαναζητάμε απάντηση.
+ * επειδή τα δύο αλφάβητα μοιράζονται γειτονικό token space.
  * -------------------------------------------------------------------------- */
 
 const CYRILLIC = /[\u0400-\u04FF]/;
@@ -550,9 +594,16 @@ app.post("/api/ai/chat", requireSession, async (c) => {
     const session = c.get("session");
     const latestUserMessage = [...messages].reverse().find((m) => m.role === "user");
 
-    // Εξάγουμε νέες μνήμες ΠΡΙΝ την απάντηση, ώστε ο Λιάκος να μπορεί να
-    // χρησιμοποιήσει αμέσως ένα νέο fact στην ίδια συζήτηση.
-    if (latestUserMessage) {
+    // Το extraction κοστίζει ξεχωριστή κλήση AI. Το τρέχουμε μόνο όταν το
+    // μήνυμα δείχνει ότι ο χρήστης δηλώνει κάτι για τον εαυτό του.
+    const looksPersonal = latestUserMessage
+      ? latestUserMessage.content.length > 25 &&
+        /(είμαι|έχω|μένω|μου αρέσει|λέγομαι|δουλεύω|αγαπώ|παίζω|θέλω να|σκύλο|γάτα|παιδ|i am|i have|i live|i like|my name)/i.test(
+          latestUserMessage.content
+        )
+      : false;
+
+    if (latestUserMessage && looksPersonal) {
       const extracted = await extractMemoriesFromMessage(c.env, latestUserMessage.content);
       for (const memory of extracted) {
         await upsertUserMemory(c.env, session.userId, memory);
@@ -588,7 +639,7 @@ app.post("/api/ai/chat", requireSession, async (c) => {
 
     // Δεύτερη ευκαιρία αν ξέφυγαν κυριλλικά σε ελληνική συνομιλία.
     if (userWroteGreek && hasCyrillic(reply)) {
-      console.warn("Cyrillic detected in Greek reply, retrying", { reply });
+      console.warn("Cyrillic detected in Greek reply, retrying");
       reply = await ask(
         "Η προηγούμενη απάντησή σου περιείχε κυριλλικούς χαρακτήρες. Αυτό είναι λάθος. Γράψε ξανά την απάντηση αποκλειστικά με ελληνικό αλφάβητο."
       );

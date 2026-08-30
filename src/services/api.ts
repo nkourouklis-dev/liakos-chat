@@ -75,6 +75,27 @@ export interface Message {
 export const listMessages = (roomId: string) =>
   request<{ messages: Message[] }>(`/api/rooms/${roomId}/messages`).then((r) => r.messages);
 
+/* ------------------------------ Unread badges ------------------------------ */
+
+export interface UnreadRoom {
+  roomId: string;
+  roomName: string;
+  count: number;
+  lastAt: number;
+}
+
+export interface UnreadState {
+  total: number;
+  rooms: UnreadRoom[];
+}
+
+export const getUnread = () => request<UnreadState>("/api/unread");
+
+export const markRoomRead = (roomId: string) =>
+  request<{ ok: boolean }>(`/api/rooms/${roomId}/read`, { method: "POST" });
+
+/* ---------------------------------- Media ---------------------------------- */
+
 export async function uploadMedia(blob: Blob): Promise<string> {
   const data = await request<{ key: string }>("/api/media", {
     method: "POST",
