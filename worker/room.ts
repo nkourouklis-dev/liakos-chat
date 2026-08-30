@@ -65,6 +65,48 @@ export class ChatRoom {
       return;
     }
 
+    /* --------------------------- Επεξεργασία μηνύματος ---------------------
+     * Το WHERE user_id = ? εξασφαλίζει ότι κανείς δεν μπορεί να πειράξει
+     * μήνυμα άλλου, ακόμη κι αν στείλει χειροκίνητα το event.
+     * ---------------------------------------------------------------------- */
+    if (payload.type === "edit") {
+      const body = String(payload.body ?? "").trim().slice(0, 4000);
+      if (!payload.id || !body) return;
+
+      const editedAt = Date.now();
+
+      const result = await this.env.DB.prepare(
+        `UPDATE messages
+         SET body = ?, edited_at = ?
+         WHERE id = ? AND user_id = ? AND kind = 'text' AND deleted_at IS NULL`
+      )
+        .bind(body, editedAt, payload.id, meta.userId)
+        .run();
+
+      if (result.meta.changes > 0) {
+        this.broadcast({ type: "edit", id: payload.id, body, editedAt });
+      }
+      return;
+    }
+
+    /* ---------------------------- Διαγραφή μηνύματος ----------------------- */
+    if (payload.type === "delete") {
+      if (!payload.id) return;
+
+      const result = await this.env.DB.prepare(
+        `UPDATE messages
+         SET deleted_at = ?
+         WHERE id = ? AND user_id = ? AND deleted_at IS NULL`
+      )
+        .bind(Date.now(), payload.id, meta.userId)
+        .run();
+
+      if (result.meta.changes > 0) {
+        this.broadcast({ type: "delete", id: payload.id });
+      }
+      return;
+    }
+
     if (payload.type === "message") {
       const event: WsEvent = {
         type: "message",

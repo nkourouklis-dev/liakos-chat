@@ -126,7 +126,7 @@ app.post("/api/auth/login", async (c) => {
 
 app.get("/api/rooms", requireSession, async (c) => {
   const { results } = await c.env.DB.prepare(
-    `SELECT r.id, r.name, r.kind FROM rooms r
+    `SELECT r.id, r.name, r.kind, r.created_by AS createdBy FROM rooms r
      JOIN room_members m ON m.room_id = r.id
      WHERE m.user_id = ? ORDER BY r.created_at DESC`
   )
@@ -157,16 +157,70 @@ app.post("/api/rooms/:id/join", requireSession, async (c) => {
 });
 
 app.get("/api/rooms/:id", requireSession, async (c) => {
-  const room = await c.env.DB.prepare("SELECT id, name, kind FROM rooms WHERE id = ?").bind(c.req.param("id")).first();
+  const room = await c.env.DB.prepare(
+    "SELECT id, name, kind, created_by AS createdBy FROM rooms WHERE id = ?"
+  )
+    .bind(c.req.param("id"))
+    .first();
   if (!room) return c.json({ error: "not found" }, 404);
   return c.json({ room });
 });
 
+app.patch("/api/rooms/:id", requireSession, async (c) => {
+  const { name } = await c.req.json<{ name?: string }>();
+  const clean = (name ?? "").trim().slice(0, 60);
+  if (clean.length < 1) return c.json({ error: "name_required" }, 400);
+
+  // Μόνο ο δημιουργός μπορεί να μετονομάσει το δωμάτιο.
+  const result = await c.env.DB.prepare("UPDATE rooms SET name = ? WHERE id = ? AND created_by = ?")
+    .bind(clean, c.req.param("id"), c.get("session").userId)
+    .run();
+
+  if (result.meta.changes === 0) return c.json({ error: "not_allowed" }, 403);
+  return c.json({ ok: true, name: clean });
+});
+
+/* ------------------------------ Διαγραφή chat ------------------------------
+ * Ο δημιουργός σβήνει το δωμάτιο για όλους.
+ * Οποιοσδήποτε άλλος απλά αποχωρεί από το δωμάτιο.
+ * -------------------------------------------------------------------------- */
+
+app.delete("/api/rooms/:id", requireSession, async (c) => {
+  const roomId = c.req.param("id");
+  const userId = c.get("session").userId;
+
+  const room = await c.env.DB.prepare("SELECT created_by AS createdBy FROM rooms WHERE id = ?")
+    .bind(roomId)
+    .first<{ createdBy: string }>();
+
+  if (!room) return c.json({ error: "not_found" }, 404);
+
+  if (room.createdBy === userId) {
+    await c.env.DB.batch([
+      c.env.DB.prepare("DELETE FROM messages WHERE room_id = ?").bind(roomId),
+      c.env.DB.prepare("DELETE FROM room_members WHERE room_id = ?").bind(roomId),
+      c.env.DB.prepare("DELETE FROM room_reads WHERE room_id = ?").bind(roomId),
+      c.env.DB.prepare("DELETE FROM rooms WHERE id = ?").bind(roomId)
+    ]);
+    return c.json({ ok: true, deleted: true });
+  }
+
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM room_members WHERE room_id = ? AND user_id = ?").bind(roomId, userId),
+    c.env.DB.prepare("DELETE FROM room_reads WHERE room_id = ? AND user_id = ?").bind(roomId, userId)
+  ]);
+  return c.json({ ok: true, deleted: false });
+});
+
 app.get("/api/rooms/:id/messages", requireSession, async (c) => {
   const { results } = await c.env.DB.prepare(
-    `SELECT m.id, m.kind, m.body, m.media_key AS mediaKey, m.created_at AS createdAt, u.handle, u.display_name AS name
+    `SELECT m.id, m.kind, m.body, m.media_key AS mediaKey, m.created_at AS createdAt,
+            m.edited_at AS editedAt, m.user_id AS userId,
+            u.handle, u.display_name AS name
      FROM messages m JOIN users u ON u.id = m.user_id
-     WHERE m.room_id = ? AND (m.expires_at IS NULL OR m.expires_at > ?)
+     WHERE m.room_id = ?
+       AND m.deleted_at IS NULL
+       AND (m.expires_at IS NULL OR m.expires_at > ?)
      ORDER BY m.created_at DESC LIMIT 100`
   )
     .bind(c.req.param("id"), Date.now())
@@ -174,10 +228,7 @@ app.get("/api/rooms/:id/messages", requireSession, async (c) => {
   return c.json({ messages: (results as any[]).reverse() });
 });
 
-/* ------------------------------ Unread badges ------------------------------
- * Μετράμε πόσα μηνύματα γράφτηκαν σε κάθε δωμάτιο μετά την τελευταία φορά
- * που το άνοιξε ο χρήστης. Δεν μετράμε τα δικά του μηνύματα.
- * -------------------------------------------------------------------------- */
+/* ------------------------------ Unread badges ------------------------------ */
 
 app.get("/api/unread", requireSession, async (c) => {
   const userId = c.get("session").userId;
@@ -194,6 +245,7 @@ app.get("/api/unread", requireSession, async (c) => {
      LEFT JOIN messages msg
        ON msg.room_id = r.id
       AND msg.user_id != ?
+      AND msg.deleted_at IS NULL
       AND msg.created_at > COALESCE(rd.last_read_at, mem.joined_at)
      GROUP BY r.id, r.name
      HAVING COUNT(msg.id) > 0`
@@ -229,8 +281,7 @@ app.post("/api/media", requireSession, async (c) => {
   return c.json({ key });
 });
 
-// Range requests -> ο browser κατεβάζει μόνο το κομμάτι που παίζει, αντί για
-// ολόκληρο το video. Χωρίς αυτό, κάθε thumbnail κατέβαζε το πλήρες αρχείο.
+// Range requests -> ο browser κατεβάζει μόνο το κομμάτι που παίζει.
 app.get("/api/media/:userId/:file", async (c) => {
   const key = `${c.req.param("userId")}/${c.req.param("file")}`;
   const range = c.req.header("Range");
@@ -271,7 +322,8 @@ app.get("/api/media/:userId/:file", async (c) => {
 
 app.get("/api/updates", requireSession, async (c) => {
   const { results } = await c.env.DB.prepare(
-    `SELECT up.id, up.caption, up.media_key AS mediaKey, up.created_at AS createdAt, u.handle, u.display_name AS name
+    `SELECT up.id, up.caption, up.media_key AS mediaKey, up.created_at AS createdAt,
+            up.user_id AS userId, u.handle, u.display_name AS name
      FROM updates up JOIN users u ON u.id = up.user_id
      WHERE up.expires_at > ? ORDER BY up.created_at DESC LIMIT 50`
   )
@@ -286,6 +338,25 @@ app.post("/api/updates", requireSession, async (c) => {
   await c.env.DB.prepare("INSERT INTO updates (id, user_id, caption, media_key, expires_at, created_at) VALUES (?,?,?,?,?,?)")
     .bind(crypto.randomUUID(), c.get("session").userId, caption ?? null, mediaKey, now + (ttlHours ?? 24) * 3600_000, now)
     .run();
+  return c.json({ ok: true });
+});
+
+// Διαγραφή δικού σου update, μαζί με το αρχείο από το R2.
+app.delete("/api/updates/:id", requireSession, async (c) => {
+  const userId = c.get("session").userId;
+
+  const row = await c.env.DB.prepare("SELECT media_key AS mediaKey FROM updates WHERE id = ? AND user_id = ?")
+    .bind(c.req.param("id"), userId)
+    .first<{ mediaKey: string }>();
+
+  if (!row) return c.json({ error: "not_allowed" }, 403);
+
+  await c.env.DB.prepare("DELETE FROM updates WHERE id = ? AND user_id = ?")
+    .bind(c.req.param("id"), userId)
+    .run();
+
+  await c.env.MEDIA.delete(row.mediaKey).catch(() => undefined);
+
   return c.json({ ok: true });
 });
 
@@ -335,7 +406,6 @@ function clampImportance(value: number): number {
   return Math.min(10, Math.max(1, Math.round(value)));
 }
 
-// Μερικά μοντέλα επιστρέφουν JSON τυλιγμένο σε markdown fences.
 function parseJsonObject<T>(raw: string): T | null {
   const cleaned = raw
     .replace(/^```json\s*/i, "")
@@ -356,11 +426,6 @@ function parseJsonObject<T>(raw: string): T | null {
     }
   }
 }
-
-/* --------------------------- Έλεγχος γλώσσας ------------------------------
- * Το Llama 4 Scout περιστασιακά γλιστράει σε κυριλλικά όταν γράφει ελληνικά,
- * επειδή τα δύο αλφάβητα μοιράζονται γειτονικό token space.
- * -------------------------------------------------------------------------- */
 
 const CYRILLIC = /[\u0400-\u04FF]/;
 const GREEK = /[\u0370-\u03FF\u1F00-\u1FFF]/;
@@ -487,7 +552,6 @@ async function extractMemoriesFromMessage(env: Env, message: string): Promise<Ex
       }))
       .filter((m) => m.key.length > 0 && m.value.length >= 2);
   } catch (error) {
-    // Αποτυχία μνήμης δεν πρέπει να κόβει την κύρια απάντηση.
     console.error("Memory extraction failed", {
       error: error instanceof Error ? error.message : String(error)
     });
@@ -637,14 +701,12 @@ app.post("/api/ai/chat", requireSession, async (c) => {
 
     let reply = await ask();
 
-    // Δεύτερη ευκαιρία αν ξέφυγαν κυριλλικά σε ελληνική συνομιλία.
     if (userWroteGreek && hasCyrillic(reply)) {
       console.warn("Cyrillic detected in Greek reply, retrying");
       reply = await ask(
         "Η προηγούμενη απάντησή σου περιείχε κυριλλικούς χαρακτήρες. Αυτό είναι λάθος. Γράψε ξανά την απάντηση αποκλειστικά με ελληνικό αλφάβητο."
       );
 
-      // Αν επιμένει, καθαρίζουμε τις κυριλλικές λέξεις.
       if (hasCyrillic(reply)) {
         reply = reply
           .split(/\s+/)

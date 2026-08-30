@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { listUpdates, mediaUrl, type Update } from "../services/api";
+import { deleteUpdate, getUser, listUpdates, mediaUrl, type Update } from "../services/api";
 
 function timeAgo(ms: number): string {
   const mins = Math.floor((Date.now() - ms) / 60000);
@@ -19,6 +19,7 @@ export default function Updates() {
   const [loading, setLoading] = useState(true);
   const [active, setActive] = useState<Update | null>(null);
   const navigate = useNavigate();
+  const me = getUser();
 
   useEffect(() => {
     listUpdates()
@@ -27,36 +28,57 @@ export default function Updates() {
       .finally(() => setLoading(false));
   }, []);
 
-  // Fullscreen player όταν πατήσεις ένα update.
+  async function remove(update: Update) {
+    if (!confirm("Διαγραφή αυτού του video;")) return;
+
+    setUpdates((prev) => prev.filter((u) => u.id !== update.id));
+    setActive(null);
+
+    try {
+      await deleteUpdate(update.id);
+    } catch {
+      alert("Κάτι πήγε στραβά.");
+      setUpdates(await listUpdates());
+    }
+  }
+
   if (active) {
+    const mine = active.userId === me?.id;
+
     return (
       <div className="fixed inset-0 z-50 flex flex-col bg-black">
-        <header className="flex items-center justify-between p-4">
-          <div className="flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-full bg-liakos-500 text-lg font-bold">
+        <header className="flex items-center justify-between p-4 pt-[max(1rem,env(safe-area-inset-top))]">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-liakos-500 text-lg font-bold">
               {initials(active.name ?? active.handle)}
             </div>
-            <div>
-              <div className="font-semibold">{active.name ?? active.handle}</div>
+            <div className="min-w-0">
+              <div className="truncate font-semibold">{active.name ?? active.handle}</div>
               <div className="text-xs text-white/50">{timeAgo(active.createdAt)}</div>
             </div>
           </div>
-          <button
-            className="flex h-11 w-11 items-center justify-center rounded-full bg-white/10 text-2xl"
-            onClick={() => setActive(null)}
-          >
-            ✕
-          </button>
+
+          <div className="flex shrink-0 gap-2">
+            {mine && (
+              <button
+                className="flex h-11 w-11 items-center justify-center rounded-full bg-red-600 text-xl"
+                onClick={() => remove(active)}
+                aria-label="Διαγραφή"
+              >
+                🗑️
+              </button>
+            )}
+            <button
+              className="flex h-11 w-11 items-center justify-center rounded-full bg-white/10 text-2xl"
+              onClick={() => setActive(null)}
+            >
+              ✕
+            </button>
+          </div>
         </header>
 
         <div className="flex flex-1 items-center justify-center">
-          <video
-            className="max-h-full w-full"
-            src={mediaUrl(active.mediaKey)}
-            controls
-            autoPlay
-            playsInline
-          />
+          <video className="max-h-full w-full" src={mediaUrl(active.mediaKey)} controls autoPlay playsInline />
         </div>
 
         {active.caption && <p className="p-5 text-center text-lg">{active.caption}</p>}
@@ -65,9 +87,9 @@ export default function Updates() {
   }
 
   return (
-    <div className="space-y-5 p-5">
+    <main className="page-shell space-y-5">
       <header className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">Updates</h1>
+        <h1 className="screen-title">📣 Feed</h1>
         <button className="btn px-5 py-3 text-base" onClick={() => navigate("/camera")}>
           + Νέο
         </button>
@@ -91,13 +113,13 @@ export default function Updates() {
         </div>
       )}
 
-      {/* preload="none" -> δεν κατεβαίνει κανένα video μέχρι να το πατήσεις */}
+      {/* preload="metadata" -> κατεβαίνει μόνο το πρώτο καρέ, όχι όλο το video */}
       <div className="grid grid-cols-2 gap-4">
         {updates.map((update) => (
           <button
             key={update.id}
             onClick={() => setActive(update)}
-            className="group relative aspect-[3/4] overflow-hidden rounded-3xl bg-white/5 text-left active:scale-95 transition"
+            className="relative aspect-[3/4] overflow-hidden rounded-3xl bg-white/5 text-left active:scale-95 transition"
           >
             <video
               className="absolute inset-0 h-full w-full object-cover opacity-80"
@@ -112,9 +134,7 @@ export default function Updates() {
               <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-liakos-500 text-sm font-bold ring-2 ring-white/20">
                 {initials(update.name ?? update.handle)}
               </div>
-              <span className="truncate text-sm font-semibold drop-shadow">
-                {update.name ?? update.handle}
-              </span>
+              <span className="truncate text-sm font-semibold drop-shadow">{update.name ?? update.handle}</span>
             </div>
 
             <div className="absolute inset-0 flex items-center justify-center">
@@ -130,6 +150,6 @@ export default function Updates() {
           </button>
         ))}
       </div>
-    </div>
+    </main>
   );
 }

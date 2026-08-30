@@ -10,7 +10,20 @@ export interface Env {
 
 export type WsEvent =
   | { type: "hello"; userId: string; handle: string }
-  | { type: "message"; id: string; roomId: string; userId: string; handle: string; name: string; kind: string; body?: string; mediaKey?: string; createdAt: number }
+  | {
+      type: "message";
+      id: string;
+      roomId: string;
+      userId: string;
+      handle: string;
+      name: string;
+      kind: string;
+      body?: string;
+      mediaKey?: string;
+      createdAt: number;
+    }
+  | { type: "edit"; id: string; body: string; editedAt: number }
+  | { type: "delete"; id: string }
   | { type: "typing"; userId: string; handle: string; name: string }
   | { type: "presence"; count: number; members: string[] }
   | { type: "game"; game: string; state: unknown }

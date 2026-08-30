@@ -47,10 +47,13 @@ export async function login(name: string): Promise<User> {
   return data.user;
 }
 
+/* ---------------------------------- Rooms --------------------------------- */
+
 export interface Room {
   id: string;
   name: string;
   kind: string;
+  createdBy: string;
 }
 
 export const listRooms = () => request<{ rooms: Room[] }>("/api/rooms").then((r) => r.rooms);
@@ -62,14 +65,28 @@ export const createRoom = (name: string) =>
 
 export const joinRoom = (id: string) => request<{ ok: boolean }>(`/api/rooms/${id}/join`, { method: "POST" });
 
+export const renameRoom = (id: string, name: string) =>
+  request<{ ok: boolean; name: string }>(`/api/rooms/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name })
+  });
+
+/** Ο δημιουργός σβήνει για όλους. Οι υπόλοιποι απλά αποχωρούν. */
+export const deleteRoom = (id: string) =>
+  request<{ ok: boolean; deleted: boolean }>(`/api/rooms/${id}`, { method: "DELETE" });
+
+/* -------------------------------- Messages -------------------------------- */
+
 export interface Message {
   id: string;
+  userId: string;
   handle: string;
   name: string;
   kind: string;
   body?: string;
   mediaKey?: string;
   createdAt: number;
+  editedAt?: number | null;
 }
 
 export const listMessages = (roomId: string) =>
@@ -107,8 +124,11 @@ export async function uploadMedia(blob: Blob): Promise<string> {
 
 export const mediaUrl = (key: string) => `${apiBaseUrl}/api/media/${key}`;
 
+/* --------------------------------- Updates --------------------------------- */
+
 export interface Update {
   id: string;
+  userId: string;
   handle: string;
   name: string;
   caption?: string;
@@ -120,6 +140,11 @@ export const listUpdates = () => request<{ updates: Update[] }>("/api/updates").
 
 export const postUpdate = (mediaKey: string, caption: string) =>
   request<{ ok: boolean }>("/api/updates", { method: "POST", body: JSON.stringify({ mediaKey, caption }) });
+
+export const deleteUpdate = (id: string) =>
+  request<{ ok: boolean }>(`/api/updates/${id}`, { method: "DELETE" });
+
+/* ------------------------------------ AI ----------------------------------- */
 
 export const askAi = (messages: { role: string; content: string }[]) =>
   request<{ reply: string }>("/api/ai/chat", { method: "POST", body: JSON.stringify({ messages }) });

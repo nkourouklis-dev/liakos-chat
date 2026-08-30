@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { createRoom, getUser, listRooms, logout, type Room } from "../services/api";
+import { createRoom, deleteRoom, getUser, listRooms, logout, type Room } from "../services/api";
 import Badge from "../components/Badge";
 
 const palette = ["bg-liakos-500", "bg-pink-500", "bg-emerald-500", "bg-amber-500", "bg-sky-500", "bg-rose-500"];
@@ -19,6 +19,7 @@ export default function Chats({ countFor }: ChatsProps) {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(true);
+  const [editMode, setEditMode] = useState(false);
   const navigate = useNavigate();
   const me = getUser();
 
@@ -36,27 +37,56 @@ export default function Chats({ countFor }: ChatsProps) {
     navigate(`/room/${id}`);
   }
 
-  // Δωμάτια με αδιάβαστα πάνε πρώτα στη λίστα.
-  const sorted = countFor
-    ? [...rooms].sort((a, b) => countFor(b.id) - countFor(a.id))
-    : rooms;
+  async function remove(room: Room) {
+    const owner = room.createdBy === me?.id;
+    const question = owner
+      ? `Να διαγραφεί το "${room.name}" για όλους; Δεν αναιρείται.`
+      : `Να αποχωρήσεις από το "${room.name}";`;
+
+    if (!confirm(question)) return;
+
+    // Αφαιρούμε αμέσως από τη λίστα, χωρίς να περιμένουμε τον server.
+    setRooms((prev) => prev.filter((r) => r.id !== room.id));
+
+    try {
+      await deleteRoom(room.id);
+    } catch {
+      alert("Κάτι πήγε στραβά.");
+      setRooms(await listRooms());
+    }
+  }
+
+  const sorted = countFor ? [...rooms].sort((a, b) => countFor(b.id) - countFor(a.id)) : rooms;
 
   return (
     <main className="page-shell space-y-5">
-      <header className="flex items-center justify-between">
-        <div>
+      <header className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
           <h1 className="screen-title">💬 Chat</h1>
-          <p className="screen-subtitle">Γεια σου, {me?.displayName}</p>
+          <p className="screen-subtitle truncate">Γεια σου, {me?.displayName}</p>
         </div>
-        <button
-          className="rounded-2xl bg-white/10 px-4 py-3 text-sm active:scale-95 transition"
-          onClick={() => {
-            logout();
-            location.href = "/login";
-          }}
-        >
-          Έξοδος
-        </button>
+
+        <div className="flex shrink-0 gap-2">
+          {rooms.length > 0 && (
+            <button
+              className={`rounded-2xl px-4 py-3 text-sm font-semibold active:scale-95 transition ${
+                editMode ? "bg-liakos-500" : "bg-white/10"
+              }`}
+              onClick={() => setEditMode((on) => !on)}
+            >
+              {editMode ? "Τέλος" : "Επεξ."}
+            </button>
+          )}
+          <button
+            className="rounded-2xl bg-white/10 px-4 py-3 text-sm active:scale-95 transition"
+            onClick={() => {
+              logout();
+              location.href = "/login";
+            }}
+          >
+            Έξοδος
+          </button>
+        </div>
       </header>
 
       <div className="flex gap-3">
@@ -91,39 +121,59 @@ export default function Chats({ countFor }: ChatsProps) {
       <div className="space-y-3">
         {sorted.map((room) => {
           const unread = countFor?.(room.id) ?? 0;
+          const owner = room.createdBy === me?.id;
 
           return (
-            <button
-              key={room.id}
-              className={`flex w-full items-center gap-4 rounded-3xl border p-4 text-left active:scale-[0.98] transition ${
-                unread > 0 ? "border-red-500/40 bg-red-500/10" : "border-white/10 bg-white/5"
-              }`}
-              onClick={() => navigate(`/room/${room.id}`)}
-            >
-              <div
-                className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl text-2xl font-bold ${colorFor(
-                  room.id
-                )}`}
+            <div key={room.id} className="flex items-center gap-2">
+              <button
+                className={`flex min-w-0 flex-1 items-center gap-4 rounded-3xl border p-4 text-left active:scale-[0.98] transition ${
+                  unread > 0 ? "border-red-500/40 bg-red-500/10" : "border-white/10 bg-white/5"
+                }`}
+                onClick={() => navigate(`/room/${room.id}`)}
               >
-                {room.name.trim().slice(0, 1).toUpperCase()}
-              </div>
-
-              <div className="min-w-0 flex-1">
-                <div className={`truncate text-lg ${unread > 0 ? "font-black" : "font-semibold"}`}>{room.name}</div>
-                <div className={`text-sm ${unread > 0 ? "text-red-300" : "text-white/40"}`}>
-                  {unread > 0
-                    ? unread === 1
-                      ? "1 νέο μήνυμα"
-                      : `${unread} νέα μηνύματα`
-                    : "Πάτα για να μπεις"}
+                <div
+                  className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl text-2xl font-bold ${colorFor(
+                    room.id
+                  )}`}
+                >
+                  {room.name.trim().slice(0, 1).toUpperCase()}
                 </div>
-              </div>
 
-              {unread > 0 ? <Badge count={unread} /> : <div className="text-2xl text-white/30">›</div>}
-            </button>
+                <div className="min-w-0 flex-1">
+                  <div className={`truncate text-lg ${unread > 0 ? "font-black" : "font-semibold"}`}>{room.name}</div>
+                  <div className={`text-sm ${unread > 0 ? "text-red-300" : "text-white/40"}`}>
+                    {unread > 0
+                      ? unread === 1
+                        ? "1 νέο μήνυμα"
+                        : `${unread} νέα μηνύματα`
+                      : owner
+                      ? "Το δημιούργησες εσύ"
+                      : "Πάτα για να μπεις"}
+                  </div>
+                </div>
+
+                {unread > 0 ? <Badge count={unread} /> : <div className="text-2xl text-white/30">›</div>}
+              </button>
+
+              {editMode && (
+                <button
+                  className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl bg-red-600 text-2xl active:scale-90 transition"
+                  onClick={() => remove(room)}
+                  aria-label={owner ? "Διαγραφή" : "Αποχώρηση"}
+                >
+                  {owner ? "🗑️" : "🚪"}
+                </button>
+              )}
+            </div>
           );
         })}
       </div>
+
+      {editMode && rooms.length > 0 && (
+        <p className="text-center text-xs text-white/40">
+          🗑️ σβήνει το chat για όλους · 🚪 απλά αποχωρείς
+        </p>
+      )}
     </main>
   );
 }
